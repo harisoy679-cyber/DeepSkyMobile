@@ -9,59 +9,333 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract Android project
+      - name: Extract project ZIP
         run: unzip -o DeepSkyMobile_Android_Starter.zip -d .
 
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Fix Kotlin source
+      - name: Replace camera activity with preview fix
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
+          cat > DeepSkyMobile/app/src/main/java/com/example/deepskymobile/MainActivity.kt <<'KOTLIN'
+          package com.example.deepskymobile
 
-          p = Path("DeepSkyMobile/app/src/main/java/com/example/deepskymobile/MainActivity.kt")
-          s = p.read_text()
+          import android.Manifest
+          import android.app.Activity
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.hardware.camera2.*
+          import android.media.ImageReader
+          import android.media.MediaScannerConnection
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.Environment
+          import android.view.Surface
+          import android.view.SurfaceHolder
+          import android.view.SurfaceView
+          import android.widget.*
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
 
-          s = s.replace("textColor=Color.LTGRAY", "setTextColor(Color.LTGRAY)")
-          s = s.replace("textColor=Color.rgb(170,190,215)", "setTextColor(Color.rgb(170,190,215))")
-          s = s.replace("d.getCameraCharacteristics(cameraId)", "cameraManager.getCameraCharacteristics(cameraId)")
+          class MainActivity : Activity(), SurfaceHolder.Callback {
+              private lateinit var preview: SurfaceView
+              private lateinit var holder: SurfaceHolder
+              private lateinit var status: TextView
+              private lateinit var cameraManager: CameraManager
+              private var cameraId = ""
+              private var device: CameraDevice? = null
+              private var session: CameraCaptureSession? = null
+              private var reader: ImageReader? = null
+              private var thread: HandlerThread? = null
+              private var handler: Handler? = null
+              private var opening = false
+              private var iso = 800
+              private var exposureNs = 2_000_000_000L
+              private var focusDistance = 0f
+              private var maxFocus = 0f
+              private var minIso = 100
+              private var maxIso = 3200
+              private var maxExposureNs = 10_000_000_000L
 
-          p.write_text(s)
-          print("Kotlin source patched")
-          PY
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = Color.rgb(8,12,22)
+                  window.navigationBarColor = Color.rgb(8,12,22)
+                  cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+                  thread = HandlerThread("DeepSkyCamera").also { it.start() }
+                  handler = Handler(thread!!.looper)
+                  buildUi()
+                  if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.CAMERA), 100)
+                  }
+              }
 
-      - name: Fix Java Kotlin targets
+              private fun buildUi() {
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.rgb(8,12,22))
+                      setPadding(16,12,16,12)
+                  }
+                  root.addView(TextView(this).apply {
+                      text="DEEPSKY MOBILE · ASTRO"
+                      textSize=18f
+                      setTextColor(Color.WHITE)
+                      setPadding(0,8,0,12)
+                  })
+                  preview = SurfaceView(this).apply { setBackgroundColor(Color.BLACK) }
+                  holder = preview.holder
+                  holder.addCallback(this)
+                  root.addView(preview, LinearLayout.LayoutParams(-1,0,1f))
+                  status = TextView(this).apply {
+                      text="Waiting for camera surface"
+                      textSize=14f
+                      setTextColor(Color.LTGRAY)
+                      setPadding(0,10,0,8)
+                  }
+                  root.addView(status)
+                  root.addView(label("ISO · Adjust sensitivity"))
+                  root.addView(SeekBar(this).apply {
+                      max=3200
+                      progress=iso
+                      setOnSeekBarChangeListener(listener {
+                          iso=it.coerceAtLeast(100)
+                          status.text="ISO $iso"
+                      })
+                  })
+                  root.addView(label("EXPOSURE · 1–10 seconds"))
+                  root.addView(SeekBar(this).apply {
+                      max=100
+                      progress=10
+                      setOnSeekBarChangeListener(listener {
+                          exposureNs=1_000_000_000L+it*90_000_000L
+                          status.text="Exposure ${(exposureNs/1_000_000_000.0)} s"
+                      })
+                  })
+                  root.addView(label("FOCUS · 0 = infinity"))
+                  root.addView(SeekBar(this).apply {
+                      max=100
+                      progress=0
+                      setOnSeekBarChangeListener(listener {
+                          focusDistance=maxFocus*(it/100f)
+                          updatePreview()
+                      })
+                  })
+                  root.addView(Button(this).apply {
+                      text="CAPTURE LONG EXPOSURE"
+                      setOnClickListener { capturePhoto() }
+                  })
+                  setContentView(root)
+              }
+
+              private fun label(t:String)=TextView(this).apply {
+                  text=t
+                  setTextColor(Color.rgb(170,190,215))
+                  textSize=12f
+                  setPadding(0,8,0,2)
+              }
+
+              private fun listener(fn:(Int)->Unit)=object:SeekBar.OnSeekBarChangeListener {
+                  override fun onProgressChanged(b:SeekBar?,v:Int,user:Boolean){ if(user) fn(v) }
+                  override fun onStartTrackingTouch(b:SeekBar?){}
+                  override fun onStopTrackingTouch(b:SeekBar?){}
+              }
+
+              override fun surfaceCreated(h:SurfaceHolder) { openCamera() }
+              override fun surfaceChanged(h:SurfaceHolder,f:Int,w:Int,he:Int) { }
+              override fun surfaceDestroyed(h:SurfaceHolder) { closeCamera() }
+
+              override fun onRequestPermissionsResult(code:Int,p:Array<out String>,r:IntArray) {
+                  super.onRequestPermissionsResult(code,p,r)
+                  if(code==100 && r.isNotEmpty() && r[0]==PackageManager.PERMISSION_GRANTED) {
+                      if(holder.surface.isValid) openCamera()
+                  } else status.text="Camera permission denied"
+              }
+
+              private fun openCamera() {
+                  if(opening || device!=null || !holder.surface.isValid ||
+                     checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED) return
+                  opening=true
+                  try {
+                      cameraId=cameraManager.cameraIdList.firstOrNull { id ->
+                          cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK
+                      } ?: cameraManager.cameraIdList.first()
+                      val chars=cameraManager.getCameraCharacteristics(cameraId)
+                      chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let {
+                          minIso=it.lower
+                          maxIso=it.upper
+                      }
+                      chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let {
+                          maxExposureNs=it.upper
+                      }
+                      chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?.let {
+                          maxFocus=it
+                      }
+                      status.text="Opening camera $cameraId…"
+                      cameraManager.openCamera(cameraId,object:CameraDevice.StateCallback(){
+                          override fun onOpened(c:CameraDevice){
+                              opening=false
+                              device=c
+                              startPreview()
+                          }
+                          override fun onDisconnected(c:CameraDevice){
+                              opening=false
+                              c.close()
+                              device=null
+                              runOnUiThread{status.text="Camera disconnected"}
+                          }
+                          override fun onError(c:CameraDevice,e:Int){
+                              opening=false
+                              c.close()
+                              device=null
+                              runOnUiThread{status.text="Camera open error $e"}
+                          }
+                      },handler)
+                  } catch(e:Exception){
+                      opening=false
+                      status.text="Open error: ${e.message}"
+                  }
+              }
+
+              private fun startPreview() {
+                  val d=device ?: return
+                  if(!holder.surface.isValid) return
+                  try {
+                      val chars=cameraManager.getCameraCharacteristics(cameraId)
+                      val map=chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                      val sizes=map?.getOutputSizes(Surface::class.java)
+                      val size=sizes?.firstOrNull { it.width<=1280 && it.height<=720 } ?: sizes?.firstOrNull()
+                      if(size!=null) holder.setFixedSize(size.width,size.height)
+                      val jpegSizes=map?.getOutputSizes(android.graphics.ImageFormat.JPEG)
+                      val jpegSize=jpegSizes?.maxByOrNull { it.width.toLong()*it.height } ?: android.util.Size(1280,720)
+                      reader?.close()
+                      reader=ImageReader.newInstance(jpegSize.width,jpegSize.height,android.graphics.ImageFormat.JPEG,2)
+                      status.text="Creating camera session…"
+                      d.createCaptureSession(listOf(holder.surface,reader!!.surface),object:CameraCaptureSession.StateCallback(){
+                          override fun onConfigured(s:CameraCaptureSession){
+                              session=s
+                              updatePreview()
+                              runOnUiThread{status.text="Preview running"}
+                          }
+                          override fun onConfigureFailed(s:CameraCaptureSession){
+                              runOnUiThread{status.text="Session configuration failed"}
+                          }
+                      },handler)
+                  } catch(e:Exception){
+                      status.text="Preview error: ${e.message}"
+                  }
+              }
+
+              private fun updatePreview() {
+                  try {
+                      val d=device ?: return
+                      val s=session ?: return
+                      val req=d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                          addTarget(holder.surface)
+                          set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_AUTO)
+                          if(maxFocus>0){
+                              set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_OFF)
+                              set(CaptureRequest.LENS_FOCUS_DISTANCE,focusDistance)
+                          }
+                      }
+                      s.setRepeatingRequest(req.build(),null,handler)
+                  } catch(e:Exception){
+                      runOnUiThread{status.text="Preview request error: ${e.message}"}
+                  }
+              }
+
+              private fun capturePhoto() {
+                  val d=device ?: run{status.text="Camera not ready";return}
+                  val s=session ?: run{status.text="Session not ready";return}
+                  val r=reader ?: return
+                  status.text="Capturing…"
+                  r.setOnImageAvailableListener({ir->
+                      val image=ir.acquireNextImage() ?: return@setOnImageAvailableListener
+                      val b=image.planes[0].buffer
+                      val bytes=ByteArray(b.remaining())
+                      b.get(bytes)
+                      image.close()
+                      saveJpeg(bytes)
+                  },handler)
+                  try {
+                      val req=d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                          addTarget(r.surface)
+                          set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_OFF)
+                          set(CaptureRequest.SENSOR_SENSITIVITY,iso.coerceIn(minIso,maxIso))
+                          set(CaptureRequest.SENSOR_EXPOSURE_TIME,exposureNs.coerceAtMost(maxExposureNs).coerceAtLeast(1_000_000L))
+                          set(CaptureRequest.SENSOR_FRAME_DURATION,exposureNs.coerceAtMost(maxExposureNs))
+                          if(maxFocus>0){
+                              set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_OFF)
+                              set(CaptureRequest.LENS_FOCUS_DISTANCE,focusDistance)
+                          }
+                      }
+                      s.capture(req.build(),object:CameraCaptureSession.CaptureCallback(){
+                          override fun onCaptureCompleted(s:CameraCaptureSession,r:CaptureRequest,result:TotalCaptureResult){
+                              runOnUiThread{
+                                  status.text="Exposure complete"
+                                  updatePreview()
+                              }
+                          }
+                      },handler)
+                  }catch(e:Exception){
+                      status.text="Capture error: ${e.message}"
+                  }
+              }
+
+              private fun saveJpeg(bytes:ByteArray){
+                  try{
+                      val dir=getExternalFilesDir(Environment.DIRECTORY_PICTURES)?:filesDir
+                      val file=File(dir,"DeepSky_${SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(Date())}.jpg")
+                      FileOutputStream(file).use{it.write(bytes)}
+                      runOnUiThread{status.text="Saved ${file.name}"}
+                      MediaScannerConnection.scanFile(this,arrayOf(file.absolutePath),arrayOf("image/jpeg"),null)
+                  }catch(e:Exception){
+                      runOnUiThread{status.text="Save failed: ${e.message}"}
+                  }
+              }
+
+              private fun closeCamera(){
+                  try{
+                      session?.close()
+                      session=null
+                      device?.close()
+                      device=null
+                      reader?.close()
+                      reader=null
+                      opening=false
+                  }catch(_:Exception){}
+              }
+
+              override fun onDestroy(){
+                  closeCamera()
+                  thread?.quitSafely()
+                  super.onDestroy()
+              }
+          }
+          KOTLIN
+
+      - name: Set Java and Kotlin target 17
         run: |
-          cat > DeepSkyMobile/app/build.gradle <<'EOF'
+          cat > DeepSkyMobile/app/build.gradle <<'GRADLE'
           plugins { id 'com.android.application'; id 'org.jetbrains.kotlin.android' }
           android {
               namespace 'com.example.deepskymobile'
               compileSdk 35
-              defaultConfig {
-                  applicationId 'com.example.deepskymobile'
-                  minSdk 26
-                  targetSdk 35
-                  versionCode 1
-                  versionName '0.1'
-              }
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-              kotlinOptions {
-                  jvmTarget = '17'
-              }
+              defaultConfig { applicationId 'com.example.deepskymobile'; minSdk 26; targetSdk 35; versionCode 2; versionName '0.2' }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = '17' }
           }
-          EOF
+          GRADLE
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -69,12 +343,10 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build APK
-        run: |
-          cd DeepSkyMobile
-          gradle assembleDebug
+        run: cd DeepSkyMobile && gradle assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DeepSkyMobile-APK
+          name: DeepSkyMobile-APK-v2
           path: DeepSkyMobile/app/build/outputs/apk/debug/*.apk
