@@ -22,7 +22,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Replace camera activity
+      - name: Replace camera activity with TextureView
         run: |
           cat > DeepSkyMobile/app/src/main/java/com/example/deepskymobile/MainActivity.kt <<'KOTLIN'
           package com.example.deepskymobile
@@ -31,6 +31,7 @@ jobs:
           import android.app.Activity
           import android.content.pm.PackageManager
           import android.graphics.Color
+          import android.graphics.SurfaceTexture
           import android.hardware.camera2.*
           import android.media.ImageReader
           import android.media.MediaScannerConnection
@@ -39,8 +40,7 @@ jobs:
           import android.os.HandlerThread
           import android.os.Environment
           import android.view.Surface
-          import android.view.SurfaceHolder
-          import android.view.SurfaceView
+          import android.view.TextureView
           import android.widget.*
           import java.io.File
           import java.io.FileOutputStream
@@ -48,10 +48,9 @@ jobs:
           import java.util.Date
           import java.util.Locale
 
-          class MainActivity : Activity(), SurfaceHolder.Callback {
+          class MainActivity : Activity() {
 
-              private lateinit var preview: SurfaceView
-              private lateinit var holder: SurfaceHolder
+              private lateinit var textureView: TextureView
               private lateinit var status: TextView
               private lateinit var cameraManager: CameraManager
 
@@ -59,10 +58,10 @@ jobs:
               private var device: CameraDevice? = null
               private var session: CameraCaptureSession? = null
               private var reader: ImageReader? = null
+              private var previewSurface: Surface? = null
 
               private var thread: HandlerThread? = null
               private var handler: Handler? = null
-              private var opening = false
 
               private var iso = 800
               private var exposureNs = 2_000_000_000L
@@ -71,6 +70,9 @@ jobs:
               private var minIso = 100
               private var maxIso = 3200
               private var maxExposureNs = 10_000_000_000L
+
+              private var opening = false
+              private var configured = false
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -85,8 +87,9 @@ jobs:
 
                   buildUi()
 
-                  if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-                      requestPermissions(arrayOf(Manifest.permission.CAMERA), 100)
+                  if (checkSelfPermission(Manifest.permission.CAMERA)
+                      != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
                   }
               }
 
@@ -104,17 +107,48 @@ jobs:
                       setPadding(0,8,0,12)
                   })
 
-                  preview = SurfaceView(this).apply {
+                  textureView = TextureView(this).apply {
                       setBackgroundColor(Color.BLACK)
                   }
 
-                  holder = preview.holder
-                  holder.addCallback(this)
+                  textureView.surfaceTextureListener =
+                      object : TextureView.SurfaceTextureListener {
 
-                  root.addView(preview, LinearLayout.LayoutParams(-1,0,1f))
+                          override fun onSurfaceTextureAvailable(
+                              surface: SurfaceTexture,
+                              width: Int,
+                              height: Int
+                          ) {
+                              openCamera()
+                          }
+
+                          override fun onSurfaceTextureSizeChanged(
+                              surface: SurfaceTexture,
+                              width: Int,
+                              height: Int
+                          ) {
+                                  restartPreview()
+                          }
+
+                          override fun onSurfaceTextureDestroyed(
+                              surface: SurfaceTexture
+                          ): Boolean {
+                              closeCamera()
+                              return true
+                          }
+
+                          override fun onSurfaceTextureUpdated(
+                              surface: SurfaceTexture
+                          ) {}
+                      }
+
+                  root.addView(
+                      textureView,
+                      LinearLayout.LayoutParams(-1,0,1f)
+                  )
 
                   status = TextView(this).apply {
-                      text = "Waiting for camera surface"
+                      text = "Waiting for camera"
                       textSize = 14f
                       setTextColor(Color.LTGRAY)
                       setPadding(0,10,0,8)
@@ -141,8 +175,10 @@ jobs:
                       progress = 10
 
                       setOnSeekBarChangeListener(listener {
-                          exposureNs = 1_000_000_000L + it * 90_000_000L
-                          status.text = "Exposure ${exposureNs / 1_000_000_000.0} s"
+                          exposureNs =
+                              1_000_000_000L + it * 90_000_000L
+                          status.text =
+                              "Exposure ${exposureNs / 1_000_000_000.0} s"
                       })
                   })
 
@@ -188,21 +224,6 @@ jobs:
                       override fun onStopTrackingTouch(b: SeekBar?) {}
                   }
 
-              override fun surfaceCreated(h: SurfaceHolder) {
-                  openCamera()
-              }
-
-              override fun surfaceChanged(
-                  h: SurfaceHolder,
-                  f: Int,
-                  w: Int,
-                  he: Int
-              ) {}
-
-              override fun surfaceDestroyed(h: SurfaceHolder) {
-                  closeCamera()
-              }
-
               override fun onRequestPermissionsResult(
                   code: Int,
                   p: Array<out String>,
@@ -214,7 +235,7 @@ jobs:
                       r.isNotEmpty() &&
                       r[0] == PackageManager.PERMISSION_GRANTED
                   ) {
-                      if (holder.surface.isValid) openCamera()
+                      if (textureView.isAvailable) openCamera()
                   } else {
                       status.text = "Camera permission denied"
                   }
@@ -223,8 +244,9 @@ jobs:
               private fun openCamera() {
                   if (opening ||
                       device != null ||
-                      !holder.surface.isValid ||
-                      checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
+                      !textureView.isAvailable ||
+                      checkSelfPermission(Manifest.permission.CAMERA)
+                      != PackageManager.PERMISSION_GRANTED
                   ) return
 
                   opening = true
@@ -236,18 +258,25 @@ jobs:
                               CameraCharacteristics.LENS_FACING_BACK
                       } ?: cameraManager.cameraIdList.first()
 
-                      val chars = cameraManager.getCameraCharacteristics(cameraId)
+                      val chars =
+                          cameraManager.getCameraCharacteristics(cameraId)
 
-                      chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let {
+                      chars.get(
+                          CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE
+                      )?.let {
                           minIso = it.lower
                           maxIso = it.upper
                       }
 
-                      chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let {
+                      chars.get(
+                          CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE
+                      )?.let {
                           maxExposureNs = it.upper
                       }
 
-                      chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?.let {
+                      chars.get(
+                          CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE
+                      )?.let {
                           maxFocus = it
                       }
 
@@ -272,12 +301,15 @@ jobs:
                                   }
                               }
 
-                              override fun onError(c: CameraDevice, e: Int) {
+                              override fun onError(
+                                  c: CameraDevice,
+                                  e: Int
+                              ) {
                                   opening = false
                                   c.close()
                                   device = null
                                   runOnUiThread {
-                                      status.text = "Camera open error $e"
+                                      status.text = "Camera error $e"
                                   }
                               }
                           },
@@ -292,24 +324,45 @@ jobs:
 
               private fun startPreview() {
                   val d = device ?: return
-                  if (!holder.surface.isValid) return
+                  val st = textureView.surfaceTexture ?: return
 
                   try {
-                      val chars = cameraManager.getCameraCharacteristics(cameraId)
+                      val chars =
+                          cameraManager.getCameraCharacteristics(cameraId)
 
                       val map = chars.get(
                           CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
                       )
 
-                      val sizes = map?.getOutputSizes(Surface::class.java)
+                      val sizes = map?.getOutputSizes(
+                          SurfaceTexture::class.java
+                      ) ?: throw Exception("No preview sizes")
 
-                      val size = sizes?.firstOrNull {
-                          it.width <= 1280 && it.height <= 720
-                      } ?: sizes?.firstOrNull()
+                      val targetRatio =
+                          if (textureView.height > 0)
+                              textureView.width.toFloat() /
+                                  textureView.height.toFloat()
+                          else 9f / 16f
 
-                      if (size != null) {
-                          holder.setFixedSize(size.width, size.height)
-                      }
+                      val size = sizes
+                          .filter {
+                              it.width <= 1920 && it.height <= 1080
+                          }
+                          .minByOrNull {
+                              kotlin.math.abs(
+                                  it.width.toFloat() /
+                                  it.height.toFloat() -
+                                  targetRatio
+                              )
+                          } ?: sizes.first()
+
+                      st.setDefaultBufferSize(
+                          size.width,
+                          size.height
+                      )
+
+                      previewSurface?.release()
+                      previewSurface = Surface(st)
 
                       val jpegSizes = map?.getOutputSizes(
                           android.graphics.ImageFormat.JPEG
@@ -331,23 +384,31 @@ jobs:
                       status.text = "Creating camera session..."
 
                       d.createCaptureSession(
-                          listOf(holder.surface, reader!!.surface),
+                          listOf(
+                              previewSurface!!,
+                              reader!!.surface
+                          ),
                           object : CameraCaptureSession.StateCallback() {
 
-                              override fun onConfigured(s: CameraCaptureSession) {
+                              override fun onConfigured(
+                                  s: CameraCaptureSession
+                              ) {
                                   session = s
+                                  configured = true
                                   updatePreview()
 
                                   runOnUiThread {
-                                      status.text = "Preview running"
+                                      status.text = "Texture preview running"
                                   }
                               }
 
                               override fun onConfigureFailed(
                                   s: CameraCaptureSession
                               ) {
+                                  configured = false
                                   runOnUiThread {
-                                      status.text = "Session configuration failed"
+                                      status.text =
+                                          "Session configuration failed"
                                   }
                               }
                           },
@@ -363,12 +424,13 @@ jobs:
                   try {
                       val d = device ?: return
                       val s = session ?: return
+                      val surf = previewSurface ?: return
 
                       val req = d.createCaptureRequest(
                           CameraDevice.TEMPLATE_PREVIEW
                       ).apply {
 
-                          addTarget(holder.surface)
+                          addTarget(surf)
 
                           set(
                               CaptureRequest.CONTROL_MODE,
@@ -385,12 +447,10 @@ jobs:
                               CaptureRequest.CONTROL_AWB_MODE_AUTO
                           )
 
-                          if (maxFocus > 0f) {
-                              set(
-                                  CaptureRequest.CONTROL_AF_MODE,
-                                  CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-                              )
-                          }
+                          set(
+                              CaptureRequest.CONTROL_AF_MODE,
+                              CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                          )
                       }
 
                       s.setRepeatingRequest(
@@ -401,9 +461,25 @@ jobs:
 
                   } catch (e: Exception) {
                       runOnUiThread {
-                          status.text = "Preview request error: ${e.message}"
+                          status.text =
+                              "Preview request error: ${e.message}"
                       }
                   }
+              }
+
+              private fun restartPreview() {
+                  if (device != null && textureView.isAvailable) {
+                      closeSessionOnly()
+                      startPreview()
+                  }
+              }
+
+              private fun closeSessionOnly() {
+                  try {
+                      session?.close()
+                      session = null
+                      configured = false
+                  } catch (_: Exception) {}
               }
 
               private fun capturePhoto() {
@@ -422,7 +498,8 @@ jobs:
                   status.text = "Capturing..."
 
                   r.setOnImageAvailableListener({ ir ->
-                      val image = ir.acquireNextImage() ?: return@setOnImageAvailableListener
+                      val image = ir.acquireNextImage()
+                          ?: return@setOnImageAvailableListener
 
                       val b = image.planes[0].buffer
                       val bytes = ByteArray(b.remaining())
@@ -431,7 +508,7 @@ jobs:
 
                       saveJpeg(bytes)
 
-                  }, handler)
+                  },handler)
 
                   try {
                       val req = d.createCaptureRequest(
@@ -457,7 +534,8 @@ jobs:
 
                           set(
                               CaptureRequest.SENSOR_EXPOSURE_TIME,
-                              exposureNs.coerceAtMost(maxExposureNs)
+                              exposureNs
+                                  .coerceAtMost(maxExposureNs)
                                   .coerceAtLeast(1_000_000L)
                           )
 
@@ -533,7 +611,8 @@ jobs:
 
                   } catch (e: Exception) {
                       runOnUiThread {
-                          status.text = "Save failed: ${e.message}"
+                          status.text =
+                              "Save failed: ${e.message}"
                       }
                   }
               }
@@ -549,6 +628,10 @@ jobs:
                       reader?.close()
                       reader = null
 
+                      previewSurface?.release()
+                      previewSurface = null
+
+                      configured = false
                       opening = false
 
                   } catch (_: Exception) {}
@@ -578,8 +661,8 @@ jobs:
                   applicationId 'com.example.deepskymobile'
                   minSdk 26
                   targetSdk 35
-                  versionCode 3
-                  versionName '0.3'
+                  versionCode 4
+                  versionName '0.4'
               }
 
               compileOptions {
@@ -604,5 +687,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DeepSkyMobile-APK-v3
+          name: DeepSkyMobile-TextureView-APK
           path: DeepSkyMobile/app/build/outputs/apk/debug/*.apk
