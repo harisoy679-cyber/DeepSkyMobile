@@ -23,6 +23,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Fix Kotlin source
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("DeepSkyMobile/app/src/main/java/com/example/deepskymobile/MainActivity.kt")
+          s = p.read_text()
+
+          s = s.replace("textColor=Color.LTGRAY", "setTextColor(Color.LTGRAY)")
+          s = s.replace("textColor=Color.rgb(170,190,215)", "setTextColor(Color.rgb(170,190,215))")
+          s = s.replace("d.getCameraCharacteristics(cameraId)", "cameraManager.getCameraCharacteristics(cameraId)")
+
+          p.write_text(s)
+          print("Kotlin source patched")
+          PY
+
       - name: Fix Java Kotlin targets
         run: |
           cat > DeepSkyMobile/app/build.gradle <<'EOF'
