@@ -15,16 +15,37 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Extract Android project
-        run: |
-          unzip -o DeepSkyMobile_Android_Starter.zip -d .
-          ls -la
-          ls -la DeepSkyMobile
+        run: unzip -o DeepSkyMobile_Android_Starter.zip -d .
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Fix Java Kotlin targets
+        run: |
+          cat > DeepSkyMobile/app/build.gradle <<'EOF'
+          plugins { id 'com.android.application'; id 'org.jetbrains.kotlin.android' }
+          android {
+              namespace 'com.example.deepskymobile'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'com.example.deepskymobile'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 1
+                  versionName '0.1'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          EOF
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
