@@ -1,4 +1,3 @@
-
 name: Build DeepSkyMobile APK
 
 on:
@@ -9,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,7 +22,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Replace camera activity with preview fix
+      - name: Replace camera activity
         run: |
           cat > DeepSkyMobile/app/src/main/java/com/example/deepskymobile/MainActivity.kt <<'KOTLIN'
           package com.example.deepskymobile
@@ -49,17 +49,21 @@ jobs:
           import java.util.Locale
 
           class MainActivity : Activity(), SurfaceHolder.Callback {
+
               private lateinit var preview: SurfaceView
               private lateinit var holder: SurfaceHolder
               private lateinit var status: TextView
               private lateinit var cameraManager: CameraManager
+
               private var cameraId = ""
               private var device: CameraDevice? = null
               private var session: CameraCaptureSession? = null
               private var reader: ImageReader? = null
+
               private var thread: HandlerThread? = null
               private var handler: Handler? = null
               private var opening = false
+
               private var iso = 800
               private var exposureNs = 2_000_000_000L
               private var focusDistance = 0f
@@ -70,12 +74,17 @@ jobs:
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+
                   window.statusBarColor = Color.rgb(8,12,22)
                   window.navigationBarColor = Color.rgb(8,12,22)
+
                   cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+
                   thread = HandlerThread("DeepSkyCamera").also { it.start() }
                   handler = Handler(thread!!.looper)
+
                   buildUi()
+
                   if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                       requestPermissions(arrayOf(Manifest.permission.CAMERA), 100)
                   }
@@ -87,236 +96,465 @@ jobs:
                       setBackgroundColor(Color.rgb(8,12,22))
                       setPadding(16,12,16,12)
                   }
+
                   root.addView(TextView(this).apply {
-                      text="DEEPSKY MOBILE · ASTRO"
-                      textSize=18f
+                      text = "DEEPSKY MOBILE · ASTRO"
+                      textSize = 18f
                       setTextColor(Color.WHITE)
                       setPadding(0,8,0,12)
                   })
-                  preview = SurfaceView(this).apply { setBackgroundColor(Color.BLACK) }
+
+                  preview = SurfaceView(this).apply {
+                      setBackgroundColor(Color.BLACK)
+                  }
+
                   holder = preview.holder
                   holder.addCallback(this)
+
                   root.addView(preview, LinearLayout.LayoutParams(-1,0,1f))
+
                   status = TextView(this).apply {
-                      text="Waiting for camera surface"
-                      textSize=14f
+                      text = "Waiting for camera surface"
+                      textSize = 14f
                       setTextColor(Color.LTGRAY)
                       setPadding(0,10,0,8)
                   }
+
                   root.addView(status)
+
                   root.addView(label("ISO · Adjust sensitivity"))
+
                   root.addView(SeekBar(this).apply {
-                      max=3200
-                      progress=iso
+                      max = 3200
+                      progress = iso
+
                       setOnSeekBarChangeListener(listener {
-                          iso=it.coerceAtLeast(100)
-                          status.text="ISO $iso"
+                          iso = it.coerceAtLeast(100)
+                          status.text = "ISO $iso"
                       })
                   })
+
                   root.addView(label("EXPOSURE · 1–10 seconds"))
+
                   root.addView(SeekBar(this).apply {
-                      max=100
-                      progress=10
+                      max = 100
+                      progress = 10
+
                       setOnSeekBarChangeListener(listener {
-                          exposureNs=1_000_000_000L+it*90_000_000L
-                          status.text="Exposure ${(exposureNs/1_000_000_000.0)} s"
+                          exposureNs = 1_000_000_000L + it * 90_000_000L
+                          status.text = "Exposure ${exposureNs / 1_000_000_000.0} s"
                       })
                   })
+
                   root.addView(label("FOCUS · 0 = infinity"))
+
                   root.addView(SeekBar(this).apply {
-                      max=100
-                      progress=0
+                      max = 100
+                      progress = 0
+
                       setOnSeekBarChangeListener(listener {
-                          focusDistance=maxFocus*(it/100f)
+                          focusDistance = maxFocus * (it / 100f)
                           updatePreview()
                       })
                   })
+
                   root.addView(Button(this).apply {
-                      text="CAPTURE LONG EXPOSURE"
+                      text = "CAPTURE LONG EXPOSURE"
                       setOnClickListener { capturePhoto() }
                   })
+
                   setContentView(root)
               }
 
-              private fun label(t:String)=TextView(this).apply {
-                  text=t
+              private fun label(t: String) = TextView(this).apply {
+                  text = t
                   setTextColor(Color.rgb(170,190,215))
-                  textSize=12f
+                  textSize = 12f
                   setPadding(0,8,0,2)
               }
 
-              private fun listener(fn:(Int)->Unit)=object:SeekBar.OnSeekBarChangeListener {
-                  override fun onProgressChanged(b:SeekBar?,v:Int,user:Boolean){ if(user) fn(v) }
-                  override fun onStartTrackingTouch(b:SeekBar?){}
-                  override fun onStopTrackingTouch(b:SeekBar?){}
+              private fun listener(fn: (Int) -> Unit) =
+                  object : SeekBar.OnSeekBarChangeListener {
+
+                      override fun onProgressChanged(
+                          b: SeekBar?,
+                          v: Int,
+                          user: Boolean
+                      ) {
+                          if (user) fn(v)
+                      }
+
+                      override fun onStartTrackingTouch(b: SeekBar?) {}
+                      override fun onStopTrackingTouch(b: SeekBar?) {}
+                  }
+
+              override fun surfaceCreated(h: SurfaceHolder) {
+                  openCamera()
               }
 
-              override fun surfaceCreated(h:SurfaceHolder) { openCamera() }
-              override fun surfaceChanged(h:SurfaceHolder,f:Int,w:Int,he:Int) { }
-              override fun surfaceDestroyed(h:SurfaceHolder) { closeCamera() }
+              override fun surfaceChanged(
+                  h: SurfaceHolder,
+                  f: Int,
+                  w: Int,
+                  he: Int
+              ) {}
 
-              override fun onRequestPermissionsResult(code:Int,p:Array<out String>,r:IntArray) {
+              override fun surfaceDestroyed(h: SurfaceHolder) {
+                  closeCamera()
+              }
+
+              override fun onRequestPermissionsResult(
+                  code: Int,
+                  p: Array<out String>,
+                  r: IntArray
+              ) {
                   super.onRequestPermissionsResult(code,p,r)
-                  if(code==100 && r.isNotEmpty() && r[0]==PackageManager.PERMISSION_GRANTED) {
-                      if(holder.surface.isValid) openCamera()
-                  } else status.text="Camera permission denied"
+
+                  if (code == 100 &&
+                      r.isNotEmpty() &&
+                      r[0] == PackageManager.PERMISSION_GRANTED
+                  ) {
+                      if (holder.surface.isValid) openCamera()
+                  } else {
+                      status.text = "Camera permission denied"
+                  }
               }
 
               private fun openCamera() {
-                  if(opening || device!=null || !holder.surface.isValid ||
-                     checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED) return
-                  opening=true
+                  if (opening ||
+                      device != null ||
+                      !holder.surface.isValid ||
+                      checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
+                  ) return
+
+                  opening = true
+
                   try {
-                      cameraId=cameraManager.cameraIdList.firstOrNull { id ->
-                          cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK
+                      cameraId = cameraManager.cameraIdList.firstOrNull { id ->
+                          cameraManager.getCameraCharacteristics(id)
+                              .get(CameraCharacteristics.LENS_FACING) ==
+                              CameraCharacteristics.LENS_FACING_BACK
                       } ?: cameraManager.cameraIdList.first()
-                      val chars=cameraManager.getCameraCharacteristics(cameraId)
+
+                      val chars = cameraManager.getCameraCharacteristics(cameraId)
+
                       chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let {
-                          minIso=it.lower
-                          maxIso=it.upper
+                          minIso = it.lower
+                          maxIso = it.upper
                       }
+
                       chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let {
-                          maxExposureNs=it.upper
+                          maxExposureNs = it.upper
                       }
+
                       chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?.let {
-                          maxFocus=it
+                          maxFocus = it
                       }
-                      status.text="Opening camera $cameraId…"
-                      cameraManager.openCamera(cameraId,object:CameraDevice.StateCallback(){
-                          override fun onOpened(c:CameraDevice){
-                              opening=false
-                              device=c
-                              startPreview()
-                          }
-                          override fun onDisconnected(c:CameraDevice){
-                              opening=false
-                              c.close()
-                              device=null
-                              runOnUiThread{status.text="Camera disconnected"}
-                          }
-                          override fun onError(c:CameraDevice,e:Int){
-                              opening=false
-                              c.close()
-                              device=null
-                              runOnUiThread{status.text="Camera open error $e"}
-                          }
-                      },handler)
-                  } catch(e:Exception){
-                      opening=false
-                      status.text="Open error: ${e.message}"
+
+                      status.text = "Opening camera..."
+
+                      cameraManager.openCamera(
+                          cameraId,
+                          object : CameraDevice.StateCallback() {
+
+                              override fun onOpened(c: CameraDevice) {
+                                  opening = false
+                                  device = c
+                                  startPreview()
+                              }
+
+                              override fun onDisconnected(c: CameraDevice) {
+                                  opening = false
+                                  c.close()
+                                  device = null
+                                  runOnUiThread {
+                                      status.text = "Camera disconnected"
+                                  }
+                              }
+
+                              override fun onError(c: CameraDevice, e: Int) {
+                                  opening = false
+                                  c.close()
+                                  device = null
+                                  runOnUiThread {
+                                      status.text = "Camera open error $e"
+                                  }
+                              }
+                          },
+                          handler
+                      )
+
+                  } catch (e: Exception) {
+                      opening = false
+                      status.text = "Open error: ${e.message}"
                   }
               }
 
               private fun startPreview() {
-                  val d=device ?: return
-                  if(!holder.surface.isValid) return
+                  val d = device ?: return
+                  if (!holder.surface.isValid) return
+
                   try {
-                      val chars=cameraManager.getCameraCharacteristics(cameraId)
-                      val map=chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                      val sizes=map?.getOutputSizes(Surface::class.java)
-                      val size=sizes?.firstOrNull { it.width<=1280 && it.height<=720 } ?: sizes?.firstOrNull()
-                      if(size!=null) holder.setFixedSize(size.width,size.height)
-                      val jpegSizes=map?.getOutputSizes(android.graphics.ImageFormat.JPEG)
-                      val jpegSize=jpegSizes?.maxByOrNull { it.width.toLong()*it.height } ?: android.util.Size(1280,720)
+                      val chars = cameraManager.getCameraCharacteristics(cameraId)
+
+                      val map = chars.get(
+                          CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+                      )
+
+                      val sizes = map?.getOutputSizes(Surface::class.java)
+
+                      val size = sizes?.firstOrNull {
+                          it.width <= 1280 && it.height <= 720
+                      } ?: sizes?.firstOrNull()
+
+                      if (size != null) {
+                          holder.setFixedSize(size.width, size.height)
+                      }
+
+                      val jpegSizes = map?.getOutputSizes(
+                          android.graphics.ImageFormat.JPEG
+                      )
+
+                      val jpegSize = jpegSizes?.maxByOrNull {
+                          it.width.toLong() * it.height
+                      } ?: android.util.Size(1280,720)
+
                       reader?.close()
-                      reader=ImageReader.newInstance(jpegSize.width,jpegSize.height,android.graphics.ImageFormat.JPEG,2)
-                      status.text="Creating camera session…"
-                      d.createCaptureSession(listOf(holder.surface,reader!!.surface),object:CameraCaptureSession.StateCallback(){
-                          override fun onConfigured(s:CameraCaptureSession){
-                              session=s
-                              updatePreview()
-                              runOnUiThread{status.text="Preview running"}
-                          }
-                          override fun onConfigureFailed(s:CameraCaptureSession){
-                              runOnUiThread{status.text="Session configuration failed"}
-                          }
-                      },handler)
-                  } catch(e:Exception){
-                      status.text="Preview error: ${e.message}"
+
+                      reader = ImageReader.newInstance(
+                          jpegSize.width,
+                          jpegSize.height,
+                          android.graphics.ImageFormat.JPEG,
+                          2
+                      )
+
+                      status.text = "Creating camera session..."
+
+                      d.createCaptureSession(
+                          listOf(holder.surface, reader!!.surface),
+                          object : CameraCaptureSession.StateCallback() {
+
+                              override fun onConfigured(s: CameraCaptureSession) {
+                                  session = s
+                                  updatePreview()
+
+                                  runOnUiThread {
+                                      status.text = "Preview running"
+                                  }
+                              }
+
+                              override fun onConfigureFailed(
+                                  s: CameraCaptureSession
+                              ) {
+                                  runOnUiThread {
+                                      status.text = "Session configuration failed"
+                                  }
+                              }
+                          },
+                          handler
+                      )
+
+                  } catch (e: Exception) {
+                      status.text = "Preview error: ${e.message}"
                   }
               }
 
               private fun updatePreview() {
                   try {
-                      val d=device ?: return
-                      val s=session ?: return
-                      val req=d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                      val d = device ?: return
+                      val s = session ?: return
+
+                      val req = d.createCaptureRequest(
+                          CameraDevice.TEMPLATE_PREVIEW
+                      ).apply {
+
                           addTarget(holder.surface)
-                          set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_AUTO)
-                          if(maxFocus>0){
-                              set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_OFF)
-                              set(CaptureRequest.LENS_FOCUS_DISTANCE,focusDistance)
+
+                          set(
+                              CaptureRequest.CONTROL_MODE,
+                              CaptureRequest.CONTROL_MODE_AUTO
+                          )
+
+                          set(
+                              CaptureRequest.CONTROL_AE_MODE,
+                              CaptureRequest.CONTROL_AE_MODE_ON
+                          )
+
+                          set(
+                              CaptureRequest.CONTROL_AWB_MODE,
+                              CaptureRequest.CONTROL_AWB_MODE_AUTO
+                          )
+
+                          if (maxFocus > 0f) {
+                              set(
+                                  CaptureRequest.CONTROL_AF_MODE,
+                                  CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                              )
                           }
                       }
-                      s.setRepeatingRequest(req.build(),null,handler)
-                  } catch(e:Exception){
-                      runOnUiThread{status.text="Preview request error: ${e.message}"}
+
+                      s.setRepeatingRequest(
+                          req.build(),
+                          null,
+                          handler
+                      )
+
+                  } catch (e: Exception) {
+                      runOnUiThread {
+                          status.text = "Preview request error: ${e.message}"
+                      }
                   }
               }
 
               private fun capturePhoto() {
-                  val d=device ?: run{status.text="Camera not ready";return}
-                  val s=session ?: run{status.text="Session not ready";return}
-                  val r=reader ?: return
-                  status.text="Capturing…"
-                  r.setOnImageAvailableListener({ir->
-                      val image=ir.acquireNextImage() ?: return@setOnImageAvailableListener
-                      val b=image.planes[0].buffer
-                      val bytes=ByteArray(b.remaining())
+                  val d = device ?: run {
+                      status.text = "Camera not ready"
+                      return
+                  }
+
+                  val s = session ?: run {
+                      status.text = "Session not ready"
+                      return
+                  }
+
+                  val r = reader ?: return
+
+                  status.text = "Capturing..."
+
+                  r.setOnImageAvailableListener({ ir ->
+                      val image = ir.acquireNextImage() ?: return@setOnImageAvailableListener
+
+                      val b = image.planes[0].buffer
+                      val bytes = ByteArray(b.remaining())
                       b.get(bytes)
                       image.close()
+
                       saveJpeg(bytes)
-                  },handler)
+
+                  }, handler)
+
                   try {
-                      val req=d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                      val req = d.createCaptureRequest(
+                          CameraDevice.TEMPLATE_STILL_CAPTURE
+                      ).apply {
+
                           addTarget(r.surface)
-                          set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_OFF)
-                          set(CaptureRequest.SENSOR_SENSITIVITY,iso.coerceIn(minIso,maxIso))
-                          set(CaptureRequest.SENSOR_EXPOSURE_TIME,exposureNs.coerceAtMost(maxExposureNs).coerceAtLeast(1_000_000L))
-                          set(CaptureRequest.SENSOR_FRAME_DURATION,exposureNs.coerceAtMost(maxExposureNs))
-                          if(maxFocus>0){
-                              set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_OFF)
-                              set(CaptureRequest.LENS_FOCUS_DISTANCE,focusDistance)
+
+                          set(
+                              CaptureRequest.CONTROL_MODE,
+                              CaptureRequest.CONTROL_MODE_OFF
+                          )
+
+                          set(
+                              CaptureRequest.CONTROL_AE_MODE,
+                              CaptureRequest.CONTROL_AE_MODE_OFF
+                          )
+
+                          set(
+                              CaptureRequest.SENSOR_SENSITIVITY,
+                              iso.coerceIn(minIso,maxIso)
+                          )
+
+                          set(
+                              CaptureRequest.SENSOR_EXPOSURE_TIME,
+                              exposureNs.coerceAtMost(maxExposureNs)
+                                  .coerceAtLeast(1_000_000L)
+                          )
+
+                          set(
+                              CaptureRequest.SENSOR_FRAME_DURATION,
+                              exposureNs.coerceAtMost(maxExposureNs)
+                          )
+
+                          if (maxFocus > 0f) {
+                              set(
+                                  CaptureRequest.CONTROL_AF_MODE,
+                                  CaptureRequest.CONTROL_AF_MODE_OFF
+                              )
+
+                              set(
+                                  CaptureRequest.LENS_FOCUS_DISTANCE,
+                                  focusDistance
+                              )
                           }
                       }
-                      s.capture(req.build(),object:CameraCaptureSession.CaptureCallback(){
-                          override fun onCaptureCompleted(s:CameraCaptureSession,r:CaptureRequest,result:TotalCaptureResult){
-                              runOnUiThread{
-                                  status.text="Exposure complete"
-                                  updatePreview()
+
+                      s.capture(
+                          req.build(),
+                          object : CameraCaptureSession.CaptureCallback() {
+
+                              override fun onCaptureCompleted(
+                                  s: CameraCaptureSession,
+                                  r: CaptureRequest,
+                                  result: TotalCaptureResult
+                              ) {
+                                  runOnUiThread {
+                                      status.text = "Exposure complete"
+                                      updatePreview()
+                                  }
                               }
-                          }
-                      },handler)
-                  }catch(e:Exception){
-                      status.text="Capture error: ${e.message}"
+                          },
+                          handler
+                      )
+
+                  } catch (e: Exception) {
+                      status.text = "Capture error: ${e.message}"
                   }
               }
 
-              private fun saveJpeg(bytes:ByteArray){
-                  try{
-                      val dir=getExternalFilesDir(Environment.DIRECTORY_PICTURES)?:filesDir
-                      val file=File(dir,"DeepSky_${SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(Date())}.jpg")
-                      FileOutputStream(file).use{it.write(bytes)}
-                      runOnUiThread{status.text="Saved ${file.name}"}
-                      MediaScannerConnection.scanFile(this,arrayOf(file.absolutePath),arrayOf("image/jpeg"),null)
-                  }catch(e:Exception){
-                      runOnUiThread{status.text="Save failed: ${e.message}"}
+              private fun saveJpeg(bytes: ByteArray) {
+                  try {
+                      val dir = getExternalFilesDir(
+                          Environment.DIRECTORY_PICTURES
+                      ) ?: filesDir
+
+                      val file = File(
+                          dir,
+                          "DeepSky_${SimpleDateFormat(
+                              "yyyyMMdd_HHmmss",
+                              Locale.US
+                          ).format(Date())}.jpg"
+                      )
+
+                      FileOutputStream(file).use {
+                          it.write(bytes)
+                      }
+
+                      runOnUiThread {
+                          status.text = "Saved ${file.name}"
+                      }
+
+                      MediaScannerConnection.scanFile(
+                          this,
+                          arrayOf(file.absolutePath),
+                          arrayOf("image/jpeg"),
+                          null
+                      )
+
+                  } catch (e: Exception) {
+                      runOnUiThread {
+                          status.text = "Save failed: ${e.message}"
+                      }
                   }
               }
 
-              private fun closeCamera(){
-                  try{
+              private fun closeCamera() {
+                  try {
                       session?.close()
-                      session=null
+                      session = null
+
                       device?.close()
-                      device=null
+                      device = null
+
                       reader?.close()
-                      reader=null
-                      opening=false
-                  }catch(_:Exception){}
+                      reader = null
+
+                      opening = false
+
+                  } catch (_: Exception) {}
               }
 
-              override fun onDestroy(){
+              override fun onDestroy() {
                   closeCamera()
                   thread?.quitSafely()
                   super.onDestroy()
@@ -327,13 +565,31 @@ jobs:
       - name: Set Java and Kotlin target 17
         run: |
           cat > DeepSkyMobile/app/build.gradle <<'GRADLE'
-          plugins { id 'com.android.application'; id 'org.jetbrains.kotlin.android' }
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
           android {
               namespace 'com.example.deepskymobile'
               compileSdk 35
-              defaultConfig { applicationId 'com.example.deepskymobile'; minSdk 26; targetSdk 35; versionCode 2; versionName '0.2' }
-              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
-              kotlinOptions { jvmTarget = '17' }
+
+              defaultConfig {
+                  applicationId 'com.example.deepskymobile'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 3
+                  versionName '0.3'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
           }
           GRADLE
 
@@ -348,5 +604,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DeepSkyMobile-APK-v2
+          name: DeepSkyMobile-APK-v3
           path: DeepSkyMobile/app/build/outputs/apk/debug/*.apk
